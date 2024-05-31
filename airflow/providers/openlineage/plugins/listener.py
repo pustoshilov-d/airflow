@@ -17,12 +17,15 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import psutil
 from openlineage.client.serde import Serde
 from packaging.version import Version
+from setproctitle import getproctitle, setproctitle
 
 from airflow import __version__ as AIRFLOW_VERSION, settings
 from airflow.listeners import hookimpl
@@ -38,6 +41,7 @@ from airflow.providers.openlineage.utils.utils import (
     is_selective_lineage_enabled,
     print_warning,
 )
+from airflow.settings import configure_orm
 from airflow.stats import Stats
 from airflow.utils.timeout import timeout
 
@@ -156,7 +160,7 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
-        on_running()
+        self._fork_execute(on_running, "on_running")
 
     @hookimpl
     def on_task_instance_success(
@@ -223,7 +227,7 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
-        on_success()
+        self._fork_execute(on_success, "on_success")
 
     if _IS_AIRFLOW_2_10_OR_HIGHER:
 
@@ -318,10 +322,40 @@ class OpenLineageListener:
                 len(Serde.to_json(redacted_event).encode("utf-8")),
             )
 
-        on_failure()
+        self._fork_execute(on_failure, "on_failure")
+
+    def _fork_execute(self, callable, callable_name: str):
+        self.log.debug("Will fork to execute OpenLineage process.")
+        pid = os.fork()
+        if pid:
+            process = psutil.Process(pid)
+            try:
+                self.log.debug("Waiting for process %s", pid)
+                process.wait(conf.execution_timeout())
+            except psutil.TimeoutExpired:
+                self.log.warning(
+                    "OpenLineage process %s expired. This should not affect process execution.", pid
+                )
+                process.kill()
+            except BaseException:
+                # Kill the process directly.
+                pass
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+            self.log.warning("Process with pid %s finished - parent", pid)
+        else:
+            setproctitle(getproctitle() + " - OpenLineage - " + callable_name)
+            configure_orm(disable_connection_pool=True)
+            self.log.debug("Executing OpenLineage process - %s - pid %s", callable_name, os.getpid())
+            callable()
+            self.log.debug("Process with current pid finishes after %s", callable_name)
+            os._exit(0)
 
     @property
     def executor(self) -> ProcessPoolExecutor:
+        # Executor for dag_run listener
         def initializer():
             # Re-configure the ORM engine as there are issues with multiple processes
             # if process calls Airflow DB.
