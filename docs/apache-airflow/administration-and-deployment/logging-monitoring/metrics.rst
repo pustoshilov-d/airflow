@@ -68,9 +68,9 @@ Add the following lines to your configuration file e.g. ``airflow.cfg``
 .. code-block:: ini
 
     [metrics]
-    otel_on = False
+    otel_on = True
     otel_host = localhost
-    otel_port = 8889
+    otel_port = 4318
     otel_prefix = airflow
     otel_interval_milliseconds = 30000  # The interval between exports, defaults to 60000
     otel_ssl_active = False
